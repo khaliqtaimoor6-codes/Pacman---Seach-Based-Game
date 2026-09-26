@@ -304,13 +304,26 @@ def _mstCost(points):
     return totalCost
 
 
+def _cachedMazeDistance(a, b, gameState, problem):
+    """Maze distance with cache in problem.heuristicInfo to avoid repeated BFS."""
+    if a == b:
+        return 0
+    key = (a, b) if a <= b else (b, a)
+    cache = problem.heuristicInfo.setdefault('mazeCache', {})
+    if key not in cache:
+        cache[key] = mazeDistance(a, b, gameState)
+    return cache[key]
+
+
 def foodHeuristic(state: Tuple[Tuple, List[List]], problem: FoodSearchProblem):
     """
     Exact-distance MST lower bound heuristic. We compute a minimum spanning tree
-    over the remaining food using shortest-path distances in the maze, then add the
-    distance from the current position to the nearest food. This remains admissible,
-    remains consistent on the project test layouts, and is much stronger than the
-    Manhattan-only lower bound used earlier.
+    over the remaining food using shortest-path (maze) distances, then add the
+    distance from the current position to the nearest food. Admissible and
+    consistent (maze distances satisfy triangle inequality; MST is a lower
+    bound on any tour visiting all food).
+    Pairwise maze distances are cached in problem.heuristicInfo['mazeCache']
+    so trickySearch runs in seconds instead of minutes.
     """
     position, foodGrid = state
     foodList = foodGrid.asList()
@@ -322,22 +335,14 @@ def foodHeuristic(state: Tuple[Tuple, List[List]], problem: FoodSearchProblem):
     if cacheKey in problem.heuristicInfo:
         return problem.heuristicInfo[cacheKey]
 
-    nearest = min(mazeDistance(position, food, problem.startingGameState) for food in foodList)
+    nearest = min(_cachedMazeDistance(position, food, problem.startingGameState, problem) for food in foodList)
     if len(foodList) == 1:
         result = nearest
     else:
-        distanceMap = {}
-        for i, foodA in enumerate(foodList):
-            for j, foodB in enumerate(foodList):
-                if i == j:
-                    continue
-                dist = mazeDistance(foodA, foodB, problem.startingGameState)
-                distanceMap[(foodA, foodB)] = dist
-                distanceMap[(foodB, foodA)] = dist
-
+        # Prim's MST over food using cached maze distances
         liveNodes = list(foodList)
         visited = {0}
-        minEdge = [distanceMap.get((liveNodes[0], liveNodes[i]), 0) for i in range(len(liveNodes))]
+        minEdge = [_cachedMazeDistance(liveNodes[0], liveNodes[i], problem.startingGameState, problem) for i in range(len(liveNodes))]
         minEdge[0] = 0
         mstCost = 0
 
@@ -354,10 +359,9 @@ def foodHeuristic(state: Tuple[Tuple, List[List]], problem: FoodSearchProblem):
             mstCost += bestCost
             for i in range(len(liveNodes)):
                 if i not in visited:
-                    nextDist = distanceMap.get((liveNodes[bestNode], liveNodes[i]),
-                                              mazeDistance(liveNodes[bestNode], liveNodes[i], problem.startingGameState))
-                    if nextDist < minEdge[i]:
-                        minEdge[i] = nextDist
+                    d = _cachedMazeDistance(liveNodes[bestNode], liveNodes[i], problem.startingGameState, problem)
+                    if d < minEdge[i]:
+                        minEdge[i] = d
 
         result = mstCost + nearest
 
@@ -406,4 +410,9 @@ def mazeDistance(point1: Tuple[int, int], point2: Tuple[int, int], gameState: pa
     assert not walls[x1][y1], 'point1 is a wall: ' + str(point1)
     assert not walls[x2][y2], 'point2 is a wall: ' + str(point2)
     prob = PositionSearchProblem(gameState, start=point1, goal=point2, warn=False, visualize=False)
-    return len(search.bfs(prob))
+    # Suspend CSV tracing: nested BFS inside heuristic must not pollute outer trace
+    was_paused = search.pauseTracing()
+    try:
+        return len(search.bfs(prob))
+    finally:
+        search.resumeTracing(was_paused)
